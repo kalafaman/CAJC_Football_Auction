@@ -39,10 +39,21 @@ env/
 
 # GCP
 *.json
+!package.json
+!package-lock.json
+!tsconfig.json
+!components.json
+!vercel.json
 service-account-key.json
 
 # Logs
 *.log
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+coverage/
 
 # OS
 .DS_Store

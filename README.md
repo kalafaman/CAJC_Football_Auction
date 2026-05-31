@@ -1,185 +1,103 @@
-# LexGuard RiskScope Backend
+# TRANSFER MARKET - Football Franchise Auction System
 
-Contract intelligence platform with 4-agent orchestration powered by Gemini 1.5 Pro.
+Production-ready event control room for a college football franchise auction.
 
-## Architecture
+## Stack
 
-### Tech Stack
-- **Python 3.12** with FastAPI and uvicorn
-- **Gemini 1.5 Pro** for all LLM operations
-- **Firestore** for clause storage
-- **GCP Secret Manager** for secrets
-- **Cloud Run** deployment target
+- Next.js 15 App Router + TypeScript
+- TailwindCSS with shadcn-style owned UI primitives
+- PostgreSQL + Prisma ORM
+- NextAuth credentials authentication for admins
+- Realtime audience updates through polling + BroadcastChannel fan-out, with database persistence for production
+- Vercel-ready deployment
 
-### 4-Agent Pipeline
+## Event Rules Implemented
 
-1. **Extractor Agent** (`agents/extractor.py`)
-   - Classifies clauses: non-compete, IP-transfer, arbitration, termination, data-collection, liability, auto-renewal, other
+- 7 database-driven teams, not hardcoded in UI
+- 9-player squad limit
+- Base capital: ₹100 Cr
+- Quiz capital quick entries: Easy ₹10 Cr, Medium ₹25 Cr, Hard ₹50 Cr
+- Capital formula: base capital + quiz/event effects - purchases
+- Positional validation: 1 GK, 2 DEF, 1 MID, 1 ATT, 4 FLEX
+- OVR-based leaderboard and winner ranking
+- Event card engine with default and custom cards
+- One-click global undo for purchases, cards, and team edits
+- CSV/XLSX player upload with column auto-mapping
+- Bulk team import using spreadsheet-style columns
+- Results exports: PDF print, Excel, CSV, JSON backup/restore
 
-2. **Analyst Agent** (`agents/analyst.py`)
-   - Scores 0-10 on 5 axes: financial_risk, privacy_risk, ip_risk, employment_risk, compliance_risk
-
-3. **Adversary Agent** (`agents/adversary.py`) - **THE USP**
-   - Hostile lawyer perspective: argues how clause could be weaponized
-   - Specific, realistic legal outcomes
-
-4. **Advisor Agent** (`agents/advisor.py`)
-   - Synthesizes: plain_language_summary, severity, negotiation_recommendation
-
-## API Endpoints
-
-### POST /api/pipeline/ingest
-Receives job_id + clauses array from pipeline.
-
-```json
-{
-  "job_id": "job-123",
-  "clauses": [
-    {
-      "clause_id": "clause-1",
-      "text": "Employee agrees not to compete...",
-      "page_number": 5
-    }
-  ]
-}
-```
-
-### GET /api/analyze/{job_id}
-Triggers 4-agent chain, returns immediately, runs in background.
-
-### WS /ws/{job_id}
-WebSocket streaming events:
-```json
-{
-  "event": "extractor_complete",
-  "clause_id": "clause-1",
-  "data": {"clause_type": "non-compete"}
-}
-```
-
-### GET /api/report/{job_id}
-Returns full JSON report for download.
-
-## Setup
-
-### Prerequisites
-1. GCP project with billing enabled
-2. APIs enabled:
-   - Cloud Run
-   - Firestore
-   - Secret Manager
-   - Container Registry
-
-### 1. Create Service Account
-```bash
-# TODO: Replace YOUR_PROJECT_ID with actual project ID
-gcloud iam service-accounts create svc-lexguard-backend \
-  --display-name="LexGuard Backend Service Account" \
-  --project=YOUR_PROJECT_ID
-
-# Grant required roles
-gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="serviceAccount:svc-lexguard-backend@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
-  --role="roles/secretmanager.secretAccessor"
-
-gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="serviceAccount:svc-lexguard-backend@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
-  --role="roles/datastore.user"
-
-gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
-  --member="serviceAccount:svc-lexguard-backend@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
-  --role="roles/run.invoker"
-```
-
-### 2. Store Gemini API Key in Secret Manager
-```bash
-# TODO: Replace YOUR_GEMINI_API_KEY with actual key
-echo -n "YOUR_GEMINI_API_KEY" | gcloud secrets create lexguard-gemini-api-key \
-  --data-file=- \
-  --project=YOUR_PROJECT_ID
-```
-
-### 3. Initialize Firestore
-```bash
-gcloud firestore databases create --location=us-central1 --project=YOUR_PROJECT_ID
-```
-
-### 4. Update Configuration
-Edit `config.py` and `cloudbuild.yaml`:
-- Replace `YOUR_PROJECT_ID` with actual GCP project ID
-- Replace `YOUR_REGION` with target region (e.g., us-central1)
-
-### 5. Deploy
-```bash
-gcloud builds submit --config=cloudbuild.yaml --project=YOUR_PROJECT_ID
-```
-
-## Security Features
-
-✅ **No hardcoded secrets** - All keys from Secret Manager  
-✅ **Non-root container user** - Runs as UID 1000  
-✅ **No unauthenticated access** - `--no-allow-unauthenticated`  
-✅ **Internal ingress only** - `internal-and-cloud-load-balancing`  
-✅ **Vulnerability scanning** - Automated in Cloud Build  
-✅ **Minimal IAM permissions** - Principle of least privilege  
-
-## Local Development
+## Local Setup
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Set environment variable
-export GCP_PROJECT_ID=YOUR_PROJECT_ID
-
-# Run locally (requires GCP credentials)
-uvicorn main:app --reload --port 8080
+npm install
+cp .env.example .env
+npm run prisma:migrate
+npm run prisma:seed
+npm run dev
 ```
 
-## Testing
+Open:
+
+- Public leaderboard: `http://localhost:3000`
+- Admin panel: `http://localhost:3000/admin`
+- Results: `http://localhost:3000/results`
+
+If `DATABASE_URL` is not configured, the app uses an in-memory/local offline fallback so the UI can still be tested quickly.
+
+## Environment Variables
+
+```env
+DATABASE_URL="postgresql://USER:PASSWORD@HOST:5432/transfer_market?schema=public"
+NEXTAUTH_SECRET="replace-with-a-long-random-secret"
+NEXTAUTH_URL="http://localhost:3000"
+ADMIN_EMAIL="admin@transfermarket.local"
+ADMIN_PASSWORD="change-me-before-event"
+```
+
+Default local admin credentials are `admin@transfermarket.local` / `admin123` when env vars are absent. Change them before production.
+
+## Spreadsheet Formats
+
+Player upload accepts CSV/XLSX columns:
+
+- `Player Name`
+- `Position`
+- `OVR`
+- `Base Price`
+
+Team bulk import accepts:
+
+- `Team Name`
+- `Color`
+- `Base Capital`
+- `Quiz Capital`
+
+Column aliases such as `Name`, `Player`, `Rating`, `Price`, `Team`, and `Capital` are also recognized.
+
+## Vercel Deployment
+
+1. Create a PostgreSQL database such as Vercel Postgres, Neon, Supabase, or Railway.
+2. Add all environment variables in Vercel Project Settings.
+3. Deploy the repository.
+4. Run Prisma migration once from a trusted machine:
 
 ```bash
-# Ingest clauses
-curl -X POST http://localhost:8080/api/pipeline/ingest \
-  -H "Content-Type: application/json" \
-  -d '{
-    "job_id": "test-job-1",
-    "clauses": [
-      {
-        "clause_id": "clause-1",
-        "text": "Employee agrees not to compete with Company for 2 years after termination."
-      }
-    ]
-  }'
-
-# Start analysis
-curl http://localhost:8080/api/analyze/test-job-1
-
-# Get report
-curl http://localhost:8080/api/report/test-job-1
+npm install
+npx prisma migrate deploy
+npx prisma db seed
 ```
 
-## Project Structure
+The build command is:
 
-```
-.
-├── main.py                 # FastAPI application
-├── config.py              # Secret Manager integration
-├── models.py              # Pydantic models
-├── storage.py             # Firestore operations
-├── orchestrator.py        # 4-agent pipeline
-├── agents/
-│   ├── extractor.py       # Clause classification
-│   ├── analyst.py         # Risk scoring
-│   ├── adversary.py       # Hostile interpretation (USP)
-│   └── advisor.py         # Recommendations
-├── Dockerfile             # Container definition
-├── cloudbuild.yaml        # Cloud Build config
-├── requirements.txt       # Python dependencies
-├── openapi.yaml          # API specification
-└── README.md             # This file
+```bash
+npm run build
 ```
 
-## License
+## Operations
 
-Proprietary - LexGuard RiskScope
+- `Enter` confirms the current sale in the auction tab.
+- `Ctrl+Z` triggers global undo.
+- `/` focuses player search.
+- Projector contrast and fullscreen controls are in the header.
+- Every mutation is persisted as `AuctionHistory`; event cards also write `EventCardHistory`.
+- Use `Backup JSON` before the event and between rounds for offline recovery.
