@@ -58,3 +58,7 @@ coverage/
 # OS
 .DS_Store
 Thumbs.db
+
+# Allow src/lib
+!src/lib/
+
