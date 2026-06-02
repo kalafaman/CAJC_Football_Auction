@@ -1,29 +1,53 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { signIn } from "next-auth/react";
-import { Download, Expand, RotateCcw, Search, TimerReset, Upload, Wifi } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Expand, Search, TimerReset, Wifi } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input, Textarea } from "@/components/ui/input";
+import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Tabs } from "@/components/ui/tabs";
-import { createId, getAnalytics, getRankedTeams, playersForTeam, squadCounts } from "@/lib/auction-engine";
-import type { AuctionState, EventCard, EventCardType, MutationAction, Player, Position, Team } from "@/lib/types";
-import { cn, downloadText, formatCr } from "@/lib/utils";
+import type { AuctionState, MutationAction, Player, Position, Team } from "@/lib/types";
+import { cn, formatCr } from "@/lib/utils";
 
 const positions: Position[] = ["GK", "DEF", "MID", "ATT"];
-const tabs = ["Auction", "Event Cards", "Team Setup", "Player Pool", "Results"];
+const tabs = ["Auction", "Teams", "Player Pool"];
 
-type Mode = "public" | "admin" | "results";
+// Hardcoded team colors (teams are fixed, no color column in DB)
+const TEAM_COLORS: Record<string, string> = {
+  "Varcelona": "#1E3A8A",
+  "Hala Barca": "#DC2626",
+  "Thenga FC": "#10B981",
+  "Team Morph": "#8B5CF6",
+  "Padayapas": "#F59E0B",
+  "Madridistas": "#D1D5DB",
+  "Real United FC": "#EF4444",
+};
+
+function teamColor(name: string): string {
+  return TEAM_COLORS[name] || "#00FF88";
+}
+
+function playersForTeam(players: Player[], teamId: string): Player[] {
+  return players.filter((p) => p.team_id === teamId && p.status === "SOLD");
+}
+
+function teamOVR(players: Player[], teamId: string): number {
+  return playersForTeam(players, teamId).reduce((sum, p) => sum + p.ovr, 0);
+}
+
+type Mode = "public" | "admin";
 
 export function TransferMarketApp({ mode }: { mode: Mode }) {
   const [state, setState] = useState<AuctionState | null>(null);
-  const [activeTab, setActiveTab] = useState(mode === "results" ? "Results" : "Auction");
+  const [activeTab, setActiveTab] = useState("Auction");
   const [toast, setToast] = useState("");
   const [loading, setLoading] = useState(true);
+  const [isMutating, setIsMutating] = useState(false);
   const [contrast, setContrast] = useState(false);
+  const soldKeyRef = useRef("");
+  const [soldPopup, setSoldPopup] = useState<{ playerName: string; teamName: string; price: number } | null>(null);
 
   const showToast = (message: string) => {
     setToast(message);
@@ -55,16 +79,35 @@ export function TransferMarketApp({ mode }: { mode: Mode }) {
     };
   }, []);
 
+  useEffect(() => {
+    if (!state?.lastSold) return;
+    const key = `${state.lastSold.playerName}|${state.lastSold.teamName}|${state.lastSold.price}|${state.lastSold.timestamp}`;
+    if (key === soldKeyRef.current) return;
+    soldKeyRef.current = key;
+
+    // Prevent showing old sales when switching tabs or remounting
+    if (Date.now() - state.lastSold.timestamp > 5000) return;
+
+    setSoldPopup(state.lastSold);
+    const timer = setTimeout(() => setSoldPopup(null), 4000);
+    return () => clearTimeout(timer);
+  }, [state?.lastSold?.playerName, state?.lastSold?.teamName, state?.lastSold?.price, state?.lastSold?.timestamp]);
+
   const mutate = async (action: MutationAction) => {
-    const response = await fetch("/api/mutate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(action),
-    });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Action failed.");
-    setState(payload);
-    if ("BroadcastChannel" in window) new BroadcastChannel("transfer-market").postMessage("updated");
+    setIsMutating(true);
+    try {
+      const response = await fetch("/api/mutate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(action),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || "Action failed.");
+      setState(payload);
+      if ("BroadcastChannel" in window) new BroadcastChannel("transfer-market").postMessage("updated");
+    } finally {
+      setIsMutating(false);
+    }
   };
 
   if (loading || !state) {
@@ -84,11 +127,11 @@ export function TransferMarketApp({ mode }: { mode: Mode }) {
     <main className={cn("min-h-screen p-4 text-white sm:p-6", contrast && "bg-black")}>
       <Header mode={mode} contrast={contrast} setContrast={setContrast} />
       {toast ? <div className="fixed right-4 top-4 z-50 rounded-md border border-primary/30 bg-black px-4 py-3 text-sm font-semibold text-primary shadow-glow">{toast}</div> : null}
-      {state.lastSold && <SoldOverlay sold={state.lastSold} />}
+      {soldPopup && <SoldOverlay sold={soldPopup} />}
       {mode === "public" ? (
         <PublicLeaderboard state={state} />
       ) : (
-        <AdminShell activeTab={activeTab} setActiveTab={setActiveTab} state={state} mutate={mutate} showToast={showToast} mode={mode} />
+        <AdminShell activeTab={activeTab} setActiveTab={setActiveTab} state={state} mutate={mutate} showToast={showToast} isMutating={isMutating} />
       )}
     </main>
   );
@@ -102,48 +145,24 @@ function Header({ mode, contrast, setContrast }: { mode: Mode; contrast: boolean
           <h1 className="text-3xl font-black tracking-[0.14em] sm:text-5xl">TRANSFER MARKET</h1>
           <Badge className="animate-pulseGlow border-red-500/40 bg-red-500/15 text-red-300">LIVE</Badge>
         </div>
-        <p className="mt-2 text-sm text-white/55">Football Franchise Auction System • 7 teams • 9-player squads • OVR decides the champion</p>
+        <p className="mt-2 text-sm text-white/55">Football Franchise Auction System • 7 teams • 7-player squads • OVR decides the champion</p>
       </div>
       <div className="no-print flex flex-wrap gap-2">
-        <a href="/" className="rounded-md border border-border px-3 py-2 text-sm font-semibold text-white/70 hover:bg-white/10">Leaderboard</a>
+        <a href="/" className="rounded-md border border-border px-3 py-2 text-sm font-semibold text-white/70 hover:bg-white/10">Squads</a>
         <a href="/admin" className="rounded-md border border-border px-3 py-2 text-sm font-semibold text-white/70 hover:bg-white/10">Admin</a>
-        <a href="/results" className="rounded-md border border-border px-3 py-2 text-sm font-semibold text-white/70 hover:bg-white/10">Results</a>
         <Button variant="secondary" onClick={() => setContrast(!contrast)}>{contrast ? "Stadium Mode" : "Projector Contrast"}</Button>
         <Button variant="secondary" onClick={() => document.documentElement.requestFullscreen?.()}><Expand className="h-4 w-4" /> Fullscreen</Button>
       </div>
-      {mode === "admin" ? <AdminLogin /> : null}
     </header>
   );
 }
 
-function AdminLogin() {
-  const [email, setEmail] = useState("admin@transfermarket.local");
-  const [password, setPassword] = useState("");
-  const [message, setMessage] = useState("Production admin actions require NextAuth credentials.");
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    const result = await signIn("credentials", { email, password, redirect: false });
-    setMessage(result?.error ? "Login failed. Check ADMIN_EMAIL and ADMIN_PASSWORD." : "Admin session active.");
-  };
-
-  return (
-    <form onSubmit={submit} className="no-print grid gap-2 rounded-lg border border-border bg-black/50 p-3 sm:grid-cols-[1fr_1fr_auto]">
-      <Input value={email} onChange={(event) => setEmail(event.target.value)} aria-label="Admin email" />
-      <Input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Admin password" type="password" aria-label="Admin password" />
-      <Button type="submit">Sign in</Button>
-      <p className="text-xs text-white/45 sm:col-span-3">{message}</p>
-    </form>
-  );
-}
-
 function PublicLeaderboard({ state }: { state: AuctionState }) {
-  const ranked = getRankedTeams(state);
   return (
-    <section className="grid gap-5 xl:grid-cols-[1.4fr_.6fr]">
+    <section className="grid gap-5 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,0.6fr)]">
       <div className="grid gap-4 lg:grid-cols-2">
-        {ranked.map((team, index) => (
-          <TeamCard key={team.id} team={team} players={playersForTeam(state.players, team.id)} rank={index + 1} />
+        {state.teams.map((team) => (
+          <TeamCard key={team.id} team={team} players={playersForTeam(state.players, team.id)} totalOVR={teamOVR(state.players, team.id)} />
         ))}
       </div>
       <aside className="space-y-4">
@@ -154,32 +173,31 @@ function PublicLeaderboard({ state }: { state: AuctionState }) {
   );
 }
 
-function TeamCard({ team, players, rank }: { team: Team; players: Player[]; rank: number }) {
-  const counts = squadCounts(players);
+function TeamCard({ team, players, totalOVR }: { team: Team; players: Player[]; totalOVR: number }) {
+  const color = teamColor(team.name);
   return (
-    <Card className="overflow-hidden transition hover:-translate-y-0.5" style={{ borderColor: team.color }}>
-      <div className="h-1.5" style={{ background: team.color }} />
+    <Card className="overflow-hidden transition hover:-translate-y-0.5" style={{ borderColor: color }}>
+      <div className="h-1.5" style={{ background: color }} />
       <CardHeader className="flex flex-row items-start justify-between gap-4">
         <div>
-          <Badge style={{ borderColor: team.color, color: team.color }}>#{rank}</Badge>
           <CardTitle className="mt-2 text-2xl">{team.name}</CardTitle>
-          <p className="text-xs text-white/45">Squad {players.length}/9 • GK {counts.GK}/1 • DEF {counts.DEF}/2 • MID {counts.MID}/1 • ATT {counts.ATT}/1</p>
+          <p className="text-xs text-white/45">Squad {players.length}/7</p>
         </div>
-        {team.logoUrl ? <img src={team.logoUrl} alt={`${team.name} logo`} className="h-14 w-14 rounded-md object-cover" /> : <div className="h-14 w-14 rounded-md border border-border" style={{ background: team.color }} />}
+        <div className="h-14 w-14 rounded-md border border-border" style={{ background: color }} />
       </CardHeader>
       <CardContent>
         <div className="grid grid-cols-3 gap-3">
-          <Metric label="Capital" value={formatCr(team.capital)} />
-          <Metric label="Total OVR" value={team.totalOVR.toString()} />
+          <Metric label="Budget" value={formatCr(team.remaining_budget)} />
+          <Metric label="Total OVR" value={totalOVR.toString()} />
           <Metric label="Players" value={players.length.toString()} />
         </div>
         <div className="mt-4 grid gap-2">
           {players.length === 0 ? <p className="rounded-md border border-dashed border-border p-3 text-sm text-white/45">No players purchased yet.</p> : null}
           {players.map((player) => (
-            <div key={player.id} className="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-md bg-white/[0.04] px-3 py-2">
+            <div key={player.id} className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 rounded-md bg-white/[0.04] px-3 py-2">
               <Badge>{player.position}</Badge>
-              <span className="truncate text-sm font-semibold">{player.name}</span>
-              <span className="font-mono text-xs text-white/55">{player.ovr} OVR • {formatCr(player.soldPrice)}</span>
+              <span className="truncate text-sm font-semibold">{player.display_name}</span>
+              <span className="font-mono text-xs text-white/55">{player.ovr} OVR • {formatCr(player.sold_price ?? 0)}</span>
             </div>
           ))}
         </div>
@@ -207,83 +225,172 @@ function SoldOverlay({ sold }: { sold: { playerName: string; teamName: string; p
   );
 }
 
+function PasswordModal({ isOpen, onClose, onConfirm, isMutating, requireConfirmation }: { isOpen: boolean; onClose: () => void; onConfirm: (pwd: string) => Promise<void>; isMutating: boolean; requireConfirmation?: string }) {
+  const [password, setPassword] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+
+  useEffect(() => {
+    if (!isOpen) {
+      setPassword("");
+      setConfirmation("");
+    }
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (requireConfirmation && confirmation !== requireConfirmation) {
+      alert(`Please type ${requireConfirmation} to confirm.`);
+      return;
+    }
+    await onConfirm(password);
+    setPassword("");
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+      <Card className="w-full max-w-sm border-primary/40 bg-black shadow-glow">
+        <form onSubmit={handleSubmit}>
+          <CardHeader>
+            <CardTitle className="text-red-500">Protected Action</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {requireConfirmation && (
+              <label className="block space-y-2">
+                <span className="text-xs uppercase text-white/45 text-red-400">Type {requireConfirmation} to confirm</span>
+                <Input value={confirmation} onChange={(e) => setConfirmation(e.target.value)} disabled={isMutating} />
+              </label>
+            )}
+            <label className="block space-y-2">
+              <span className="text-xs uppercase text-white/45">Admin Password</span>
+              <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus disabled={isMutating} />
+            </label>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button type="button" variant="secondary" onClick={onClose} disabled={isMutating}>Cancel</Button>
+              <Button type="submit" disabled={isMutating}>{isMutating ? "Processing..." : "Confirm"}</Button>
+            </div>
+          </CardContent>
+        </form>
+      </Card>
+    </div>
+  );
+}
+
 function AdminShell({
   activeTab,
   setActiveTab,
   state,
   mutate,
   showToast,
-  mode,
+  isMutating
 }: {
   activeTab: string;
   setActiveTab: (tab: string) => void;
   state: AuctionState;
   mutate: (action: MutationAction) => Promise<void>;
   showToast: (message: string) => void;
-  mode: Mode;
+  isMutating: boolean;
 }) {
+  const [passwordModal, setPasswordModal] = useState<{ isOpen: boolean; action: MutationAction | null; requireConfirmation?: string; successMsg?: string }>({ isOpen: false, action: null });
+
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
-        event.preventDefault();
-        mutate({ type: "UNDO" }).then(() => showToast("Last action rolled back."));
-      }
-      if (event.key === "/" && document.activeElement?.tagName !== "INPUT") {
+      if (event.key === "/" && document.activeElement?.tagName !== "INPUT" && document.activeElement?.tagName !== "TEXTAREA") {
         event.preventDefault();
         document.querySelector<HTMLInputElement>("[data-search]")?.focus();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [mutate, showToast]);
+  }, []);
+
+  const handleProtectedAction = (action: MutationAction, successMsg: string, requireConfirmation?: string) => {
+    setPasswordModal({ isOpen: true, action, requireConfirmation, successMsg });
+  };
+
+  const executeProtectedAction = async (password: string) => {
+    if (!passwordModal.action) return;
+    try {
+      await mutate({ ...passwordModal.action, password } as MutationAction);
+      showToast(passwordModal.successMsg || "Action completed.");
+      setPasswordModal({ isOpen: false, action: null });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Action failed.");
+      // Auto-clear logic inside the modal takes over; leave modal open on failure.
+    }
+  };
 
   return (
-    <section className="grid gap-5 xl:grid-cols-[1fr_360px]">
-      <div className="space-y-4">
+    <section className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <PasswordModal 
+        isOpen={passwordModal.isOpen} 
+        onClose={() => setPasswordModal({ isOpen: false, action: null })} 
+        onConfirm={executeProtectedAction} 
+        isMutating={isMutating} 
+        requireConfirmation={passwordModal.requireConfirmation} 
+      />
+      
+      <div className="space-y-4 min-w-0">
         <div className="no-print flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <Tabs tabs={tabs} value={activeTab} onChange={setActiveTab} />
-          <Button variant="secondary" onClick={() => mutate({ type: "UNDO" }).then(() => showToast("Last action rolled back."))}>
-            <RotateCcw className="h-4 w-4" /> Global Undo
-          </Button>
         </div>
-        {activeTab === "Auction" && <AuctionTab state={state} mutate={mutate} showToast={showToast} />}
-        {activeTab === "Event Cards" && <EventCardsTab state={state} mutate={mutate} showToast={showToast} />}
-        {activeTab === "Team Setup" && <TeamSetupTab state={state} mutate={mutate} showToast={showToast} />}
-        {activeTab === "Player Pool" && <PlayerPoolTab state={state} mutate={mutate} showToast={showToast} />}
-        {activeTab === "Results" && <ResultsTab state={state} mutate={mutate} showToast={showToast} />}
+        {activeTab === "Auction" && <AuctionTab state={state} mutate={mutate} showToast={showToast} isMutating={isMutating} />}
+        {activeTab === "Teams" && <TeamsTab state={state} onProtectedAction={handleProtectedAction} isMutating={isMutating} />}
+        {activeTab === "Player Pool" && <PlayerPoolTab state={state} mutate={mutate} onProtectedAction={handleProtectedAction} showToast={showToast} isMutating={isMutating} />}
       </div>
-      <aside className="space-y-4">
+      <aside className="space-y-4 min-w-0">
         <AuctionTimer />
         <LiveFeed state={state} />
-        <AnalyticsPanel state={state} />
       </aside>
     </section>
   );
 }
 
-function AuctionTab({ state, mutate, showToast }: { state: AuctionState; mutate: (action: MutationAction) => Promise<void>; showToast: (message: string) => void }) {
+function AuctionTab({ state, mutate, showToast, isMutating }: { state: AuctionState; mutate: (action: MutationAction) => Promise<void>; showToast: (message: string) => void; isMutating: boolean }) {
   const [teamId, setTeamId] = useState(state.teams[0]?.id ?? "");
-  const [playerId, setPlayerId] = useState(state.players.find((player) => !player.sold)?.id ?? "");
-  const [bid, setBid] = useState(0);
-  const player = state.players.find((item) => item.id === playerId);
-  const team = state.teams.find((item) => item.id === teamId);
-  const available = state.players.filter((item) => !item.sold);
-  const remaining = (team?.capital ?? 0) - bid;
+  const [playerId, setPlayerId] = useState(state.players.find((p) => p.status === "AVAILABLE")?.id ?? "");
+  const [bid, setBid] = useState<number | string>(0);
+  const [playerSearch, setPlayerSearch] = useState("");
+
+  const available = state.players.filter((item) => item.status === "AVAILABLE");
+  const filteredAvailable = available.filter(p => p.display_name.toLowerCase().includes(playerSearch.toLowerCase()) || p.enum_name.toLowerCase().includes(playerSearch.toLowerCase()));
 
   useEffect(() => {
-    if (player && bid === 0) setBid(player.basePrice);
+    if (filteredAvailable.length > 0 && !filteredAvailable.find(p => p.id === playerId)) {
+      setPlayerId(filteredAvailable[0].id);
+      setBid(filteredAvailable[0].base_price);
+    }
+  }, [playerSearch, filteredAvailable, playerId]);
+
+  const player = state.players.find((item) => item.id === playerId);
+  const team = state.teams.find((item) => item.id === teamId);
+  const remaining = (team?.remaining_budget ?? 0) - Number(bid || 0);
+
+  useEffect(() => {
+    if (player && bid === 0) setBid(player.base_price);
   }, [player, bid]);
 
   const confirm = async () => {
-    if (!teamId || !playerId) return;
-    if (!window.confirm(`Confirm sale: ${player?.name} to ${team?.name} for ${formatCr(bid)}?`)) return;
-    await mutate({ type: "SELL_PLAYER", teamId, playerId, soldPrice: Number(bid) });
-    showToast("Sale confirmed and leaderboard updated.");
+    if (!teamId || !playerId || isMutating) return;
+    const finalBid = Number(bid);
+    if (isNaN(finalBid) || finalBid < (player?.base_price ?? 0)) {
+      showToast("Invalid bid amount.");
+      return;
+    }
+    if (!window.confirm(`Confirm sale: ${player?.display_name} to ${team?.name} for ${formatCr(finalBid)}?`)) return;
+    try {
+      await mutate({ type: "SELL_PLAYER", teamId, playerId, soldPrice: finalBid });
+      showToast("Sale confirmed and leaderboard updated.");
+      setPlayerSearch("");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Sale failed.");
+    }
   };
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (event.key === "Enter" && (event.target as HTMLElement).tagName !== "TEXTAREA") confirm();
+      if (event.key === "Enter" && (event.target as HTMLElement).tagName !== "TEXTAREA" && (event.target as HTMLElement).tagName !== "INPUT") confirm();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
@@ -297,212 +404,291 @@ function AuctionTab({ state, mutate, showToast }: { state: AuctionState; mutate:
       <CardContent className="grid gap-4 lg:grid-cols-4">
         <label className="space-y-2">
           <span className="text-xs uppercase text-white/45">Team</span>
-          <Select value={teamId} onChange={(event) => setTeamId(event.target.value)}>
+          <Select value={teamId} onChange={(event) => setTeamId(event.target.value)} disabled={isMutating}>
             {state.teams.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
           </Select>
         </label>
         <label className="space-y-2">
-          <span className="text-xs uppercase text-white/45">Player</span>
-          <Select value={playerId} onChange={(event) => { setPlayerId(event.target.value); setBid(state.players.find((p) => p.id === event.target.value)?.basePrice ?? 0); }}>
-            {available.map((item) => <option key={item.id} value={item.id}>{item.name} • {item.position} • {item.ovr}</option>)}
+          <div className="flex justify-between items-center">
+            <span className="text-xs uppercase text-white/45">Player</span>
+            <input 
+              type="text" 
+              className="w-24 bg-transparent text-xs outline-none border-b border-border text-white/60 placeholder:text-white/20" 
+              placeholder="Filter..." 
+              value={playerSearch} 
+              onChange={e => setPlayerSearch(e.target.value)} 
+              disabled={isMutating} 
+            />
+          </div>
+          <Select value={playerId} onChange={(event) => { setPlayerId(event.target.value); setBid(state.players.find((p) => p.id === event.target.value)?.base_price ?? 0); }} disabled={isMutating}>
+            {filteredAvailable.map((item) => <option key={item.id} value={item.id}>{item.display_name} • {item.position} • {item.ovr}</option>)}
+            {filteredAvailable.length === 0 && <option value="" disabled>No players found</option>}
           </Select>
         </label>
         <label className="space-y-2">
           <span className="text-xs uppercase text-white/45">Winning Bid</span>
-          <Input type="number" value={bid} min={0} onChange={(event) => setBid(Number(event.target.value))} />
+          <Input type="number" value={bid} min={0} onChange={(event) => setBid(event.target.value)} disabled={isMutating} />
         </label>
         <div className="grid grid-cols-2 gap-3">
-          <Metric label="Current" value={formatCr(team?.capital)} />
+          <Metric label="Current" value={formatCr(team?.remaining_budget ?? 0)} />
           <Metric label="After" value={formatCr(remaining)} />
         </div>
         <div className="lg:col-span-4 flex flex-wrap items-center gap-3">
-          <Button onClick={confirm}>Confirm Sale</Button>
-          <span className="text-sm text-white/50">Enter confirms sale • Ctrl+Z rolls back • / focuses search</span>
+          <Button onClick={confirm} disabled={isMutating}>{isMutating ? "Processing..." : "Confirm Sale"}</Button>
+          <span className="text-sm text-white/50">Enter confirms sale • / focuses search</span>
         </div>
       </CardContent>
     </Card>
   );
 }
 
-function TeamSetupTab({ state, mutate, showToast }: { state: AuctionState; mutate: (action: MutationAction) => Promise<void>; showToast: (message: string) => void }) {
-  const [bulk, setBulk] = useState("Team Name,Color,Base Capital,Quiz Capital\n");
-
-  const bulkImport = async () => {
-    const rows = parseDelimited(bulk);
-    const teams = rows.map((row) => ({
-      name: pick(row, ["team name", "name", "team"]) || "Unnamed Team",
-      color: pick(row, ["color", "colour"]) || "#00FF88",
-      baseCapital: Number(pick(row, ["base capital", "capital"]) || 100),
-      quizCapital: Number(pick(row, ["quiz capital", "quizcapital", "quiz"]) || 0),
-    }));
-    await mutate({ type: "BULK_IMPORT_TEAMS", teams });
-    showToast(`Imported ${teams.length} teams from spreadsheet format.`);
-  };
-
+function TeamsTab({ state, onProtectedAction, isMutating }: { state: AuctionState; onProtectedAction: (a: MutationAction, m: string, req?: string) => void; isMutating: boolean }) {
   return (
-    <div className="grid gap-4">
-      <Card>
-        <CardHeader><CardTitle>Team Setup</CardTitle></CardHeader>
-        <CardContent className="grid gap-4">
-          {state.teams.map((team) => (
-            <div key={team.id} className="grid gap-3 rounded-md border border-border bg-black/25 p-3 lg:grid-cols-[1.1fr_.7fr_.6fr_.6fr_1fr_auto]">
-              <Input value={team.name} onChange={(event) => mutate({ type: "UPDATE_TEAM", teamId: team.id, patch: { name: event.target.value } })} />
-              <Input value={team.color} type="color" onChange={(event) => mutate({ type: "UPDATE_TEAM", teamId: team.id, patch: { color: event.target.value } })} />
-              <Input value={team.baseCapital} type="number" onChange={(event) => mutate({ type: "UPDATE_TEAM", teamId: team.id, patch: { baseCapital: Number(event.target.value) } })} />
-              <Input value={team.quizCapital} type="number" onChange={(event) => mutate({ type: "UPDATE_TEAM", teamId: team.id, patch: { quizCapital: Number(event.target.value) } })} />
-              <Input value={team.logoUrl ?? ""} placeholder="Logo URL" onChange={(event) => mutate({ type: "UPDATE_TEAM", teamId: team.id, patch: { logoUrl: event.target.value } })} />
-              <div className="flex gap-1">
-                {[10, 25, 50].map((value) => (
-                  <Button key={value} size="sm" variant="secondary" onClick={() => mutate({ type: "UPDATE_TEAM", teamId: team.id, patch: { quizCapital: team.quizCapital + value } })}>+{value}</Button>
-                ))}
+    <Card>
+      <CardHeader>
+        <CardTitle>Teams Overview</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid gap-4 lg:grid-cols-2">
+          {state.teams.map((team) => {
+            const color = teamColor(team.name);
+            const roster = playersForTeam(state.players, team.id);
+            const ovr = teamOVR(state.players, team.id);
+            return (
+              <div key={team.id} className="flex flex-col gap-4 rounded-md border border-border bg-black/25 p-4">
+                <div className="flex items-center gap-3">
+                  <div className="h-8 w-8 rounded shrink-0" style={{ background: color }} />
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold truncate">{team.name}</p>
+                    <p className="text-xs text-white/45">Squad {roster.length}/7</p>
+                  </div>
+                </div>
+                
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <Metric label="Budget" value={formatCr(team.remaining_budget)} />
+                  <Metric label="Initial" value={formatCr(team.initial_budget)} />
+                  <Metric label="OVR" value={ovr.toString()} />
+                  <div className="flex flex-col justify-center gap-1.5">
+                    <Button 
+                      size="sm" 
+                      variant="secondary" 
+                      onClick={() => {
+                        const newStr = window.prompt(`Edit remaining budget for ${team.name} (Current: ${formatCr(team.remaining_budget)})\n\nYou can type a direct number (e.g. 150) or add/subtract (e.g. +10 or -15):`, team.remaining_budget.toString());
+                        if (newStr !== null && newStr.trim() !== "") {
+                          let newBudget = team.remaining_budget;
+                          const val = newStr.trim();
+                          if (val.startsWith("+")) {
+                            newBudget += parseFloat(val.substring(1));
+                          } else if (val.startsWith("-")) {
+                            newBudget -= parseFloat(val.substring(1));
+                          } else {
+                            newBudget = parseFloat(val);
+                          }
+                          if (!isNaN(newBudget)) {
+                            onProtectedAction({ type: "UPDATE_BUDGET", teamId: team.id, newBudget }, `Budget updated for ${team.name}`);
+                          } else {
+                            alert("Invalid number format.");
+                          }
+                        }
+                      }}
+                      disabled={isMutating}
+                      className="h-full w-full text-[10px] leading-none"
+                    >
+                      Edit Remaining
+                    </Button>
+                    <Button 
+                      size="sm" 
+                      variant="secondary" 
+                      onClick={() => {
+                        const newStr = window.prompt(`Edit initial budget for ${team.name} (Current: ${formatCr(team.initial_budget)})\n\nNOTE: Modifying this will automatically adjust the remaining budget by the exact difference to keep maths consistent.`, team.initial_budget.toString());
+                        if (newStr !== null && newStr.trim() !== "") {
+                          const newInitial = parseFloat(newStr.trim());
+                          if (!isNaN(newInitial)) {
+                            onProtectedAction({ type: "UPDATE_INITIAL_BUDGET", teamId: team.id, newInitialBudget: newInitial }, `Initial budget updated for ${team.name}`);
+                          } else {
+                            alert("Invalid number format.");
+                          }
+                        }
+                      }}
+                      disabled={isMutating}
+                      className="h-full w-full text-[10px] leading-none"
+                    >
+                      Edit Initial
+                    </Button>
+                  </div>
+                </div>
+
+                {roster.length > 0 && (
+                  <div className="mt-2 space-y-1.5 border-t border-border/50 pt-3">
+                    {roster.map(p => (
+                      <div key={p.id} className="flex justify-between items-center text-sm">
+                        <span className="text-white/80 truncate pr-2 flex items-center gap-2">
+                          <span className="text-white/40 text-[10px] uppercase font-bold">{p.position}</span>
+                          {p.display_name}
+                        </span>
+                        <span className="font-mono text-white/60 text-xs shrink-0">{formatCr(p.sold_price ?? 0)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader><CardTitle>Bulk Team Import</CardTitle></CardHeader>
-        <CardContent className="grid gap-3">
-          <p className="text-sm text-white/50">Paste CSV from the event spreadsheet. Accepted columns: Team Name, Color, Base Capital, Quiz Capital.</p>
-          <Textarea value={bulk} onChange={(event) => setBulk(event.target.value)} />
-          <Button onClick={bulkImport}><Upload className="h-4 w-4" /> Import Teams</Button>
-        </CardContent>
-      </Card>
-    </div>
+            );
+          })}
+        </div>
+        <div className="flex gap-3 border-t border-border pt-4">
+          <Button variant="secondary" onClick={() => onProtectedAction({ type: "RESET_AUCTION" }, "Auction reset complete.")} disabled={isMutating}>Reset Auction</Button>
+          <Button variant="secondary" onClick={() => onProtectedAction({ type: "FACTORY_RESET" }, "Factory reset complete. Canonical dataset restored.", "RESET")} disabled={isMutating}>Factory Reset</Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
-function PlayerPoolTab({ state, mutate, showToast }: { state: AuctionState; mutate: (action: MutationAction) => Promise<void>; showToast: (message: string) => void }) {
+function AddPlayerForm({ onProtectedAction, isMutating }: { onProtectedAction: (a: MutationAction, m: string) => void; isMutating: boolean }) {
+  const [display, setDisplay] = useState("");
+  const [pos, setPos] = useState<Position>("ATT");
+  const [ovr, setOvr] = useState(80);
+  const [price, setPrice] = useState(10);
+
+  // Auto-generate ENUM_NAME based on display name
+  const autoEnum = display.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_|_$/g, "");
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!display || !autoEnum || isMutating) return;
+    onProtectedAction(
+      { type: "ADD_PLAYER", display_name: display, enum_name: autoEnum, position: pos, ovr, base_price: price },
+      `${display} added to the pool.`
+    );
+    setDisplay("");
+    setOvr(80);
+    setPrice(10);
+  };
+
+  return (
+    <form onSubmit={submit} className="no-print grid gap-3 lg:grid-cols-[1fr_auto_100px_100px_auto] items-end rounded-md border border-border bg-black/25 p-3 mb-4">
+      <label className="space-y-1">
+        <span className="text-xs uppercase text-white/45">Add New Player</span>
+        <Input placeholder="e.g. Kylian Mbappe" value={display} onChange={e => setDisplay(e.target.value)} disabled={isMutating} />
+      </label>
+      <label className="space-y-1">
+        <span className="text-xs uppercase text-white/45">Position</span>
+        <Select value={pos} onChange={e => setPos(e.target.value as Position)} disabled={isMutating}>
+          {positions.map(p => <option key={p} value={p}>{p}</option>)}
+        </Select>
+      </label>
+      <label className="space-y-1">
+        <span className="text-xs uppercase text-white/45">OVR</span>
+        <Input type="number" value={ovr} onChange={e => setOvr(Number(e.target.value))} disabled={isMutating} />
+      </label>
+      <label className="space-y-1">
+        <span className="text-xs uppercase text-white/45">Base Price</span>
+        <Input type="number" value={price} onChange={e => setPrice(Number(e.target.value))} disabled={isMutating} />
+      </label>
+      <Button type="submit" disabled={isMutating || !display}>Add Player</Button>
+    </form>
+  )
+}
+
+function PlayerPoolTab({ state, mutate, onProtectedAction, showToast, isMutating }: { state: AuctionState; mutate: (action: MutationAction) => Promise<void>; onProtectedAction: (a: MutationAction, m: string) => void; showToast: (message: string) => void; isMutating: boolean }) {
   const [query, setQuery] = useState("");
   const [position, setPosition] = useState<Position | "ALL">("ALL");
-  const filtered = state.players.filter((player) => (position === "ALL" || player.position === position) && player.name.toLowerCase().includes(query.toLowerCase()));
+  const [statusFilter, setStatusFilter] = useState<"ALL" | "AVAILABLE" | "SOLD" | "UNAVAILABLE">("ALL");
+  
+  const filtered = state.players.filter((player) =>
+    (position === "ALL" || player.position === position) &&
+    (statusFilter === "ALL" || player.status === statusFilter) &&
+    player.display_name.toLowerCase().includes(query.toLowerCase())
+  );
 
-  const upload = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const players = await parsePlayerFile(file);
-    await mutate({ type: "IMPORT_PLAYERS", players });
-    showToast(`Imported ${players.length} valid players.`);
+  const handleAction = async (action: MutationAction, successMsg: string) => {
+    try {
+      await mutate(action);
+      showToast(successMsg);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Action failed.");
+    }
+  };
+
+  const handleDelete = (player: Player) => {
+    if (window.confirm(`Are you sure you want to permanently delete ${player.display_name}?`)) {
+      onProtectedAction({ type: "DELETE_PLAYER", playerId: player.id }, `${player.display_name} deleted.`);
+    }
   };
 
   return (
     <Card>
       <CardHeader><CardTitle>Player Pool</CardTitle></CardHeader>
       <CardContent className="space-y-4">
-        <div className="no-print grid gap-3 lg:grid-cols-[1fr_160px_220px]">
+        
+        <AddPlayerForm onProtectedAction={onProtectedAction} isMutating={isMutating} />
+
+        <div className="no-print grid gap-3 lg:grid-cols-[1fr_120px_140px]">
           <div className="relative">
             <Search className="absolute left-3 top-3 h-4 w-4 text-white/35" />
             <Input data-search className="pl-9" placeholder="Search player..." value={query} onChange={(event) => setQuery(event.target.value)} />
           </div>
           <Select value={position} onChange={(event) => setPosition(event.target.value as Position | "ALL")}>
-            <option value="ALL">All</option>
+            <option value="ALL">All Pos</option>
             {positions.map((item) => <option key={item} value={item}>{item}</option>)}
           </Select>
-          <label className="flex cursor-pointer items-center justify-center gap-2 rounded-md border border-border bg-white/5 px-3 text-sm font-semibold hover:bg-white/10">
-            <Upload className="h-4 w-4" /> CSV/XLSX Upload
-            <input type="file" accept=".csv,.xlsx,.xls" onChange={upload} className="hidden" />
-          </label>
+          <Select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}>
+            <option value="ALL">All Status</option>
+            <option value="AVAILABLE">Available</option>
+            <option value="SOLD">Sold</option>
+            <option value="UNAVAILABLE">Unavailable</option>
+          </Select>
         </div>
-        <DataTable rows={filtered.map((player) => [player.name, player.position, `${player.ovr}`, formatCr(player.basePrice), player.sold ? "Sold" : "Available"])} headers={["Name", "Position", "OVR", "Base Price", "Status"]} />
-      </CardContent>
-    </Card>
-  );
-}
-
-function EventCardsTab({ state, mutate, showToast }: { state: AuctionState; mutate: (action: MutationAction) => Promise<void>; showToast: (message: string) => void }) {
-  const [teamId, setTeamId] = useState(state.teams[0]?.id ?? "");
-  const [playerId, setPlayerId] = useState("");
-  const [draft, setDraft] = useState<EventCard>({ id: createId("card"), name: "", type: "ADD_CAPITAL", amount: 10, description: "", enabled: true });
-  const teamPlayers = playersForTeam(state.players, teamId);
-
-  return (
-    <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
-      <Card>
-        <CardHeader><CardTitle>Event Card Engine</CardTitle></CardHeader>
-        <CardContent className="grid gap-3">
-          <Select value={teamId} onChange={(event) => setTeamId(event.target.value)}>
-            {state.teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
-          </Select>
-          <Select value={playerId} onChange={(event) => setPlayerId(event.target.value)}>
-            <option value="">Optional player target</option>
-            {teamPlayers.map((player) => <option key={player.id} value={player.id}>{player.name}</option>)}
-          </Select>
-          <div className="grid gap-3 md:grid-cols-2">
-            {state.eventCards.map((card) => (
-              <div key={card.id} className="rounded-md border border-border bg-black/30 p-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="font-semibold">{card.name}</p>
-                    <p className="text-sm text-white/50">{card.description}</p>
-                  </div>
-                  <Badge>{card.type}</Badge>
-                </div>
-                <div className="mt-3 flex gap-2">
-                  <Button size="sm" onClick={() => mutate({ type: "APPLY_CARD", teamId, cardId: card.id, playerId: playerId || undefined }).then(() => showToast("Event card applied."))}>Apply</Button>
-                  <Button size="sm" variant="secondary" onClick={() => setDraft(card)}>Edit</Button>
-                  <Button size="sm" variant="destructive" onClick={() => mutate({ type: "DELETE_CARD", cardId: card.id })}>Delete</Button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader><CardTitle>Card Library</CardTitle></CardHeader>
-        <CardContent className="grid gap-3">
-          <Input placeholder="Card name" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
-          <Select value={draft.type} onChange={(event) => setDraft({ ...draft, type: event.target.value as EventCardType })}>
-            {["ADD_CAPITAL", "DEDUCT_CAPITAL", "REMOVE_PLAYER", "SELL_PLAYER_FOR_AMOUNT", "FREE_PLAYER", "CUSTOM"].map((type) => <option key={type} value={type}>{type}</option>)}
-          </Select>
-          <Input type="number" value={draft.amount ?? 0} onChange={(event) => setDraft({ ...draft, amount: Number(event.target.value) })} />
-          <Textarea placeholder="Effect description" value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} />
-          <Button onClick={() => mutate({ type: "UPSERT_CARD", card: draft }).then(() => { showToast("Card saved."); setDraft({ id: createId("card"), name: "", type: "ADD_CAPITAL", amount: 10, description: "", enabled: true }); })}>Save Card</Button>
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
-
-function ResultsTab({ state, mutate, showToast }: { state: AuctionState; mutate: (action: MutationAction) => Promise<void>; showToast: (message: string) => void }) {
-  const restoreRef = useRef<HTMLInputElement>(null);
-  const ranked = getRankedTeams(state);
-  const exportCsv = () => {
-    const lines = ["Rank,Team,Total OVR,Capital Left,Squad"];
-    ranked.forEach((team, index) => lines.push(`${index + 1},"${team.name}",${team.totalOVR},${team.capital},"${playersForTeam(state.players, team.id).map((p) => `${p.name} (${p.position}/${p.ovr})`).join("; ")}"`));
-    downloadText("transfer-market-results.csv", lines.join("\n"), "text/csv");
-  };
-  const exportExcel = async () => {
-    const XLSX = await import("xlsx");
-    const rows = ranked.map((team, index) => ({ Rank: index + 1, Team: team.name, "Total OVR": team.totalOVR, "Capital Left": team.capital, Squad: playersForTeam(state.players, team.id).map((p) => p.name).join(", ") }));
-    const sheet = XLSX.utils.json_to_sheet(rows);
-    const book = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(book, sheet, "Results");
-    XLSX.writeFile(book, "transfer-market-results.xlsx");
-  };
-  const restore = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const restored = JSON.parse(await file.text()) as AuctionState;
-    await mutate({ type: "RESTORE", state: restored });
-    showToast("Database restored from backup.");
-  };
-
-  return (
-    <Card>
-      <CardHeader><CardTitle>Final Rankings</CardTitle></CardHeader>
-      <CardContent className="space-y-4">
-        <div className="no-print flex flex-wrap gap-2">
-          <Button onClick={() => window.print()}><Download className="h-4 w-4" /> PDF</Button>
-          <Button variant="secondary" onClick={exportExcel}>Excel</Button>
-          <Button variant="secondary" onClick={exportCsv}>CSV</Button>
-          <Button variant="secondary" onClick={() => downloadText("transfer-market-backup.json", JSON.stringify(state, null, 2), "application/json")}>Backup JSON</Button>
-          <Button variant="secondary" onClick={() => restoreRef.current?.click()}>Restore JSON</Button>
-          <input ref={restoreRef} type="file" accept=".json" className="hidden" onChange={restore} />
+        <div className="overflow-auto rounded-md border border-border">
+          <table className="w-full min-w-[820px] border-collapse text-left text-sm">
+            <thead className="bg-white/10 text-xs uppercase tracking-wider text-white/55">
+              <tr>
+                <th className="px-3 py-3">Name</th>
+                <th className="px-3 py-3">Pos</th>
+                <th className="px-3 py-3">OVR</th>
+                <th className="px-3 py-3">Base</th>
+                <th className="px-3 py-3">Status</th>
+                <th className="px-3 py-3">Team</th>
+                <th className="px-3 py-3 no-print">Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((player) => {
+                const team = player.team_id ? state.teams.find((t) => t.id === player.team_id) : null;
+                return (
+                  <tr key={player.id} className="border-t border-border odd:bg-white/[0.025]">
+                    <td className="px-3 py-3 font-semibold">{player.display_name}</td>
+                    <td className="px-3 py-3"><Badge>{player.position}</Badge></td>
+                    <td className="px-3 py-3">{player.ovr}</td>
+                    <td className="px-3 py-3">{formatCr(player.base_price)}</td>
+                    <td className="px-3 py-3">
+                      <span className={cn("rounded-full px-2 py-0.5 text-xs font-semibold",
+                        player.status === "AVAILABLE" && "bg-green-500/20 text-green-300",
+                        player.status === "SOLD" && "bg-blue-500/20 text-blue-300",
+                        player.status === "UNAVAILABLE" && "bg-red-500/20 text-red-300"
+                      )}>{player.status}</span>
+                    </td>
+                    <td className="px-3 py-3 text-white/55">{team ? `${team.name} (${formatCr(player.sold_price ?? 0)})` : "—"}</td>
+                    <td className="px-3 py-3 no-print flex gap-2 flex-wrap">
+                      {player.status === "AVAILABLE" && (
+                        <Button size="sm" variant="secondary" onClick={() => onProtectedAction({ type: "MARK_UNAVAILABLE", playerId: player.id }, `${player.display_name} marked unavailable.`)} disabled={isMutating}>Unavailable</Button>
+                      )}
+                      {player.status === "UNAVAILABLE" && (
+                        <Button size="sm" variant="secondary" onClick={() => onProtectedAction({ type: "MARK_AVAILABLE", playerId: player.id }, `${player.display_name} recovered to available pool.`)} disabled={isMutating}>Recover</Button>
+                      )}
+                      {player.status === "SOLD" && (
+                        <Button size="sm" variant="secondary" onClick={() => handleAction({ type: "REMOVE_PLAYER", playerId: player.id }, `${player.display_name} removed from team.`)} disabled={isMutating}>Remove</Button>
+                      )}
+                      {player.status !== "SOLD" && (
+                        <Button size="sm" variant="destructive" onClick={() => handleDelete(player)} disabled={isMutating}>Delete</Button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
-        <DataTable
-          headers={["Rank", "Team", "Total OVR", "Capital Left", "Squad"]}
-          rows={ranked.map((team, index) => [`#${index + 1}`, team.name, String(team.totalOVR), formatCr(team.capital), playersForTeam(state.players, team.id).map((p) => `${p.name} (${p.position})`).join(", ") || "Incomplete"])}
-        />
       </CardContent>
     </Card>
   );
@@ -548,82 +734,6 @@ function LiveFeed({ state }: { state: AuctionState }) {
 }
 
 function AuctionTicker({ state }: { state: AuctionState }) {
-  const items = state.players.filter((player) => player.sold).map((player) => `${player.name} sold for ${formatCr(player.soldPrice)}`);
+  const items = state.players.filter((p) => p.status === "SOLD").map((p) => `${p.display_name} sold for ${formatCr(p.sold_price ?? 0)}`);
   return <div className="overflow-hidden rounded-lg border border-border bg-black/60 p-3 text-sm text-primary"><div className="animate-ticker whitespace-nowrap">{items.concat(items).join(" • ") || "Auction ticker waiting for first sale..."}</div></div>;
-}
-
-function AnalyticsPanel({ state }: { state: AuctionState }) {
-  const analytics = useMemo(() => getAnalytics(state), [state]);
-  return (
-    <Card>
-      <CardHeader><CardTitle>Analytics</CardTitle></CardHeader>
-      <CardContent className="space-y-2 text-sm">
-        <p>Most expensive: <b>{analytics.mostExpensivePlayer?.name ?? "N/A"}</b></p>
-        <p>Highest spending: <b>{analytics.highestSpendingTeam?.name ?? "N/A"}</b></p>
-        <p>Best value: <b>{analytics.bestValuePurchase?.name ?? "N/A"}</b></p>
-        <p>Most active: <b>{analytics.mostActiveTeam?.name ?? "N/A"}</b></p>
-      </CardContent>
-    </Card>
-  );
-}
-
-function DataTable({ headers, rows }: { headers: string[]; rows: string[][] }) {
-  return (
-    <div className="overflow-auto rounded-md border border-border">
-      <table className="w-full min-w-[760px] border-collapse text-left text-sm">
-        <thead className="bg-white/10 text-xs uppercase tracking-wider text-white/55">
-          <tr>{headers.map((header) => <th key={header} className="px-3 py-3">{header}</th>)}</tr>
-        </thead>
-        <tbody>
-          {rows.map((row, index) => (
-            <tr key={index} className="border-t border-border odd:bg-white/[0.025]">
-              {row.map((cell, cellIndex) => <td key={cellIndex} className="px-3 py-3">{cell}</td>)}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function parseDelimited(text: string) {
-  const [headerLine, ...lines] = text.trim().split(/\r?\n/);
-  const headers = headerLine.split(/,|\t/).map((header) => header.trim().toLowerCase());
-  return lines.filter(Boolean).map((line) => {
-    const values = line.split(/,|\t/).map((value) => value.trim());
-    return Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""]));
-  });
-}
-
-function pick(row: Record<string, string>, names: string[]) {
-  return names.map((name) => row[name]).find(Boolean);
-}
-
-async function parsePlayerFile(file: File) {
-  const rows = file.name.endsWith(".csv")
-    ? parseDelimited(await file.text())
-    : await parseXlsx(file);
-  return rows.map((row, index) => {
-    const name = pick(row, ["player name", "name", "player"]) || `Player ${index + 1}`;
-    const rawPosition = (pick(row, ["position", "pos"]) || "MID").toUpperCase();
-    const position = positions.includes(rawPosition as Position) ? (rawPosition as Position) : "MID";
-    return {
-      id: createId("player"),
-      name,
-      position,
-      ovr: Number(pick(row, ["ovr", "overall", "rating"]) || 70),
-      basePrice: Number(pick(row, ["base price", "price", "base"]) || 1),
-    };
-  });
-}
-
-async function parseXlsx(file: File): Promise<Record<string, string>[]> {
-  const XLSX = await import("xlsx");
-  const buffer = await file.arrayBuffer();
-  const book = XLSX.read(buffer);
-  const sheet = book.Sheets[book.SheetNames[0]];
-  const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet);
-  return json.map((row) =>
-    Object.fromEntries(Object.entries(row).map(([key, value]) => [key.trim().toLowerCase(), String(value ?? "").trim()])),
-  );
 }
